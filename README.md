@@ -14,7 +14,8 @@ Generate, randomize, and animate realistic human head meshes directly in 3ds Max
 
 ## Screenshots
 
-> *(Add screenshots here)*
+
+![screenshot](etc/ScreenshotA.png)
 
 ---
 
@@ -97,11 +98,15 @@ Move the **identity sliders** to sculpt the head shape. Each slider corresponds 
 - **Create New Mesh** — generate a new mesh in the scene with the current settings
 - **Use Selected** — select an existing GNM mesh in the viewport, then click to load its identity into the sliders
 
+![screenshot](etc/ScreenshotB.png)
+
 ### Expression tab
 
 Five collapsible groups of expression sliders control facial expressions. **Lower Face** is open by default; the other groups start collapsed.
 
 Pose controls at the top let you rotate the head, neck, and eyes.
+
+![screenshot](etc/ScreenshotC.png)
 
 ### Presets tab
 
@@ -112,6 +117,8 @@ Pose controls at the top let you rotate the head, neck, and eyes.
 5. **Right-click** for: Load / Rename / Set Category / Delete
 
 Category headers can be **renamed** by right-clicking the category name.
+
+![screenshot](etc/ScreenshotD.png)
 
 ### Population tab
 
