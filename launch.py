@@ -19,6 +19,7 @@ if _parent not in sys.path:
 
 _dock = None
 _widget = None
+_time_cb_tool = None   # GNMTool instance when animation callback is armed
 
 
 def _evict_gnm_modules():
@@ -33,9 +34,48 @@ def _evict_gnm_modules():
     importlib.invalidate_caches()
 
 
+def _register_time_callback(tool_instance):
+    """Arm the GNM animation scrub callback. Called from the Animation tab."""
+    global _time_cb_tool
+    _time_cb_tool = tool_instance
+    try:
+        import pymxs
+        pymxs.runtime.execute(
+            'fn gnm_time_cb = '
+            '( python.execute "import GNM.launch as _gl; _gl._on_time_change()" )\n'
+            'registerTimeCallback gnm_time_cb'
+        )
+    except Exception as e:
+        print(f"[GNM] registerTimeCallback failed: {e}")
+
+
+def _unregister_time_callback():
+    """Disarm the GNM animation scrub callback."""
+    global _time_cb_tool
+    _time_cb_tool = None
+    try:
+        import pymxs
+        pymxs.runtime.execute('unregisterTimeCallback gnm_time_cb')
+    except Exception:
+        pass
+
+
+def _on_time_change():
+    """Called by Max every time sliderTime changes. Runs on Max's main thread."""
+    if _time_cb_tool is None:
+        return
+    try:
+        import pymxs
+        frame = int(pymxs.runtime.currentTime.frame)
+        _time_cb_tool.apply_params_at_frame(frame)
+    except Exception as e:
+        print(f"[GNM] time callback error: {e}")
+
+
 def _close_existing():
     """Close and fully destroy any previously opened dock / widget."""
     global _dock, _widget
+    _unregister_time_callback()
     from PySide6 import QtWidgets
 
     if _dock is not None:

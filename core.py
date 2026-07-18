@@ -177,6 +177,8 @@ class GNMTool(QtWidgets.QWidget):
         self._setup_worker = None
         self._expr_region_data = []
         self._gender_strength = 0.0   # -1.0 = full female, +1.0 = full male
+        self._anim_keyframes = []     # list of dicts sorted by frame
+        self._anim_armed = False      # True when time callback is registered
 
         self._debounce = QtCore.QTimer(self)
         self._debounce.setSingleShot(True)
@@ -330,6 +332,7 @@ class GNMTool(QtWidgets.QWidget):
         tabs.addTab(self._build_expression_tab(), "Expression")
         tabs.addTab(self._build_presets_tab(), "Presets")
         tabs.addTab(self._build_population_tab(), "Population")
+        tabs.addTab(self._build_animation_tab(), "Animation")
         layout.addWidget(tabs)
 
         self._lbl_update_status.setStyleSheet("font-size: 11px;")
@@ -818,6 +821,135 @@ class GNMTool(QtWidgets.QWidget):
         self._refresh_presets()
         return tab
 
+    # ─── Animation tab ───────────────────────────────────────────────────────
+
+    def _build_animation_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # ── Arm toggle ────────────────────────────────────────────────────
+        self._btn_anim_arm = QtWidgets.QPushButton("Arm Animation")
+        self._btn_anim_arm.setCheckable(True)
+        self._btn_anim_arm.setMinimumHeight(32)
+        self._btn_anim_arm.setStyleSheet(
+            "QPushButton { background:#333; border:1px solid #555; border-radius:4px; "
+            "color:#ddd; font-weight:bold; }"
+            "QPushButton:checked { background:#7b0000; border-color:#ff4444; color:#ff8888; }"
+            "QPushButton:checked:hover { background:#990000; }"
+            "QPushButton:hover { background:#444; border-color:#00AAFF; }"
+        )
+        self._btn_anim_arm.toggled.connect(self._on_arm_animation)
+        layout.addWidget(self._btn_anim_arm)
+
+        lbl_hint = QtWidgets.QLabel(
+            "Set sliders to a pose, move Max timeline to a frame, then Add Keyframe."
+        )
+        lbl_hint.setStyleSheet("color:#666; font-size:10px;")
+        lbl_hint.setWordWrap(True)
+        layout.addWidget(lbl_hint)
+
+        # ── Keyframe list ────────────────────────────────────────────────
+        self._list_keyframes = QtWidgets.QListWidget()
+        self._list_keyframes.setStyleSheet(
+            "QListWidget { background:#1a1a1a; border:1px solid #444; border-radius:3px; }"
+            "QListWidget::item { padding:4px 8px; color:#ccc; font-family:Consolas; font-size:11px; }"
+            "QListWidget::item:selected { background:#005588; color:#fff; }"
+            "QListWidget::item:hover { background:#2a3a4a; }"
+        )
+        layout.addWidget(self._list_keyframes, 1)
+
+        # ── Action buttons ───────────────────────────────────────────────
+        btn_row1 = QtWidgets.QHBoxLayout()
+        btn_add = QtWidgets.QPushButton("Add Keyframe")
+        btn_add.setObjectName("btn_primary")
+        btn_add.clicked.connect(self._on_add_keyframe)
+        btn_goto = QtWidgets.QPushButton("Go To Frame")
+        btn_goto.clicked.connect(self._on_goto_keyframe)
+        btn_row1.addWidget(btn_add)
+        btn_row1.addWidget(btn_goto)
+        layout.addLayout(btn_row1)
+
+        btn_row2 = QtWidgets.QHBoxLayout()
+        btn_delete = QtWidgets.QPushButton("Delete")
+        btn_delete.clicked.connect(self._on_delete_keyframe)
+        btn_clear = QtWidgets.QPushButton("Clear All")
+        btn_clear.clicked.connect(self._on_clear_keyframes)
+        btn_row2.addWidget(btn_delete)
+        btn_row2.addWidget(btn_clear)
+        layout.addLayout(btn_row2)
+
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#444;")
+        layout.addWidget(sep)
+
+        # ── Save row with name field ─────────────────────────────────────
+        save_row = QtWidgets.QHBoxLayout()
+        self._edit_anim_name = QtWidgets.QLineEdit()
+        self._edit_anim_name.setPlaceholderText("Animation name…")
+        btn_save_anim = QtWidgets.QPushButton("Save")
+        btn_save_anim.setFixedWidth(50)
+        btn_save_anim.clicked.connect(self._on_save_animation)
+        save_row.addWidget(self._edit_anim_name)
+        save_row.addWidget(btn_save_anim)
+        layout.addLayout(save_row)
+
+        # ── Saved animations list ────────────────────────────────────────
+        self._list_saved_anims = QtWidgets.QListWidget()
+        self._list_saved_anims.setMaximumHeight(80)
+        self._list_saved_anims.setStyleSheet(
+            "QListWidget { background:#111; border:1px solid #444; border-radius:3px; }"
+            "QListWidget::item { padding:2px 6px; color:#aaa; font-size:11px; }"
+            "QListWidget::item:selected { background:#005588; color:#fff; }"
+        )
+        self._list_saved_anims.itemDoubleClicked.connect(
+            lambda item: self._load_animation_by_name(item.text()))
+        layout.addWidget(self._list_saved_anims)
+
+        btn_row3 = QtWidgets.QHBoxLayout()
+        btn_load_anim = QtWidgets.QPushButton("Load Selected")
+        btn_load_anim.clicked.connect(self._on_load_animation)
+        btn_del_anim = QtWidgets.QPushButton("Delete")
+        btn_del_anim.clicked.connect(self._on_delete_saved_animation)
+        btn_row3.addWidget(btn_load_anim)
+        btn_row3.addWidget(btn_del_anim)
+        layout.addLayout(btn_row3)
+        self._refresh_saved_anims()
+
+        sep2 = QtWidgets.QFrame()
+        sep2.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#444;")
+        layout.addWidget(sep2)
+
+        self._btn_bake = QtWidgets.QPushButton("Bake to Timeline")
+        self._btn_bake.setMinimumHeight(32)
+        self._btn_bake.setToolTip(
+            "Render every frame in the scene timeline and bake vertex positions "
+            "directly into Max's timeline as animated vertex keys."
+        )
+        self._btn_bake.setStyleSheet(
+            "QPushButton { background:#1a3300; border:1px solid #336600; border-radius:4px; "
+            "color:#88ff44; font-weight:bold; }"
+            "QPushButton:hover { background:#224400; border-color:#66cc00; }"
+            "QPushButton:disabled { background:#222; color:#555; border-color:#444; }"
+        )
+        self._btn_bake.clicked.connect(self._on_bake_pc2)
+        layout.addWidget(self._btn_bake)
+
+        self._bake_progress = QtWidgets.QProgressBar()
+        self._bake_progress.setRange(0, 100)
+        self._bake_progress.setValue(0)
+        self._bake_progress.setVisible(False)
+        self._bake_progress.setStyleSheet(
+            "QProgressBar { border:1px solid #555; border-radius:3px; background:#222; height:14px; }"
+            "QProgressBar::chunk { background:#66cc00; border-radius:2px; }"
+        )
+        layout.addWidget(self._bake_progress)
+
+        return tab
+
     # ─── Population tab ──────────────────────────────────────────────────────
 
     def _build_population_tab(self) -> QtWidgets.QWidget:
@@ -959,10 +1091,13 @@ class GNMTool(QtWidgets.QWidget):
             self.logger.error("GNM not loaded. Please reopen the tool.")
             return
 
+        # Stop debounce while creating to avoid re-entrant calls
+        self._debounce.stop()
+        self._pending = False
+
         name = self._edit_name.text().strip() or "GNM_Head"
         self._btn_new_mesh.setEnabled(False)
         self._btn_new_mesh.setText("Creating...")
-        QtWidgets.QApplication.processEvents()
 
         eff_identity = self._get_gendered_identity()
         vertices, triangles, triangle_uvs = gnm_bridge.generate_head(
@@ -970,13 +1105,14 @@ class GNMTool(QtWidgets.QWidget):
         if vertices is not None:
             self._current_mesh = gnm_bridge.create_max_mesh(
                 vertices, triangles, triangle_uvs=triangle_uvs, name=name,
-                identity=self._identity, logger=self.logger  # save raw identity (without gender bake)
+                identity=self._identity, logger=self.logger
             )
         else:
             self.logger.error("Mesh creation failed.")
 
         self._btn_new_mesh.setEnabled(True)
         self._btn_new_mesh.setText("Create New Mesh")
+        QtCore.QTimer.singleShot(0, self._redraw_views)
 
     # ─── Live update flow ────────────────────────────────────────────────────
 
@@ -990,10 +1126,11 @@ class GNMTool(QtWidgets.QWidget):
             return
 
         self._set_update_status("⟳ Updating...", "#FFA500")
-        self._gen_worker = GenerateWorker(self._get_gendered_identity(), self._expression, self._rotations, parent=self)
-        self._gen_worker.sig_vertices.connect(self._on_vertices_ready)
-        self._gen_worker.finished.connect(self._on_worker_finished)
-        self._gen_worker.start()
+        worker = GenerateWorker(self._get_gendered_identity(), self._expression, self._rotations, parent=self)
+        worker.sig_vertices.connect(self._on_vertices_ready)
+        worker.finished.connect(self._on_worker_finished)
+        self._gen_worker = worker
+        worker.start()
 
     def _on_vertices_ready(self, vertices):
         if vertices is None or not self._check_mesh_valid():
@@ -1001,6 +1138,15 @@ class GNMTool(QtWidgets.QWidget):
         gnm_bridge.update_max_mesh_vertices(self._current_mesh, vertices)
         gnm_bridge.save_identity_to_mesh(self._current_mesh, self._gen_worker._identity)
         self._log_active_params()
+        # Defer redraw outside Max's notification stack (fixes DirtyNotificationEventMonitor on Max 2027)
+        QtCore.QTimer.singleShot(0, self._redraw_views)
+
+    def _redraw_views(self):
+        try:
+            import pymxs
+            pymxs.runtime.redrawViews()
+        except Exception:
+            pass
 
     def _on_worker_finished(self):
         self._set_update_status("✓ Updated", "#00FF00")
@@ -1181,9 +1327,8 @@ class GNMTool(QtWidgets.QWidget):
         self._expression[:] = 0.0
         randomize_ranges = [(200, 25), (0, 20), (100, 20)]
         for start, count in randomize_ranges:
-            vals = (np.random.randn(count) * 10).clip(-30, 30).astype(int)
-            for offset in range(count):
-                self._expression[start + offset] = vals[offset] / _SLIDER_SCALE
+            vals = np.random.uniform(-3.0, 3.0, count).astype(np.float32)
+            self._expression[start:start + count] = vals
 
         # Reflect in sliders
         for start_dim, sliders, labels in self._expr_region_data:
@@ -1503,6 +1648,314 @@ class GNMTool(QtWidgets.QWidget):
             self._refresh_presets()
         except Exception as e:
             self.logger.error(f"Failed to save preset: {e}")
+
+    # ─── Animation logic ─────────────────────────────────────────────────────
+
+    _ANIM_DIR = Path(__file__).parent / "animation"
+
+    def _on_arm_animation(self, checked: bool):
+        import GNM.launch as _launch
+        if checked:
+            if not self._check_mesh_valid():
+                self.logger.warning("No active GNM mesh — create one first.")
+                self._btn_anim_arm.blockSignals(True)
+                self._btn_anim_arm.setChecked(False)
+                self._btn_anim_arm.blockSignals(False)
+                return
+            _launch._register_time_callback(self)
+            self._anim_armed = True
+            self._btn_anim_arm.setText("Disarm Animation")
+            self.logger.info("Animation armed — scrub the Max timeline to update the mesh.")
+        else:
+            _launch._unregister_time_callback()
+            self._anim_armed = False
+            self._btn_anim_arm.setText("Arm Animation")
+            self.logger.info("Animation disarmed.")
+
+    def _on_add_keyframe(self):
+        if not self._check_mesh_valid():
+            self.logger.warning("No active GNM mesh.")
+            return
+        try:
+            import pymxs
+            frame = int(pymxs.runtime.currentTime.frame)
+        except Exception:
+            self.logger.error("Could not read current frame from Max.")
+            return
+
+        # Replace existing keyframe at this frame if present
+        self._anim_keyframes = [k for k in self._anim_keyframes if k["frame"] != frame]
+        self._anim_keyframes.append({
+            "frame":      frame,
+            "identity":   self._get_gendered_identity().tolist(),
+            "expression": self._expression.tolist(),
+            "rotations":  self._rotations.tolist(),
+            "gender":     self._gender_strength,
+        })
+        self._anim_keyframes.sort(key=lambda k: k["frame"])
+        self._refresh_keyframe_list()
+        self.logger.info(f"Keyframe added at frame {frame}.")
+
+    def _on_delete_keyframe(self):
+        row = self._list_keyframes.currentRow()
+        if row < 0:
+            return
+        frame = self._anim_keyframes[row]["frame"]
+        del self._anim_keyframes[row]
+        self._refresh_keyframe_list()
+        self.logger.info(f"Keyframe at frame {frame} deleted.")
+
+    def _on_clear_keyframes(self):
+        reply = QtWidgets.QMessageBox.question(
+            self, "Clear All", "Delete all keyframes?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._anim_keyframes.clear()
+            self._refresh_keyframe_list()
+            self.logger.info("All keyframes cleared.")
+
+    def _on_goto_keyframe(self):
+        row = self._list_keyframes.currentRow()
+        if row < 0:
+            return
+        frame = self._anim_keyframes[row]["frame"]
+        try:
+            import pymxs
+            pymxs.runtime.sliderTime = pymxs.runtime.time(frame)
+        except Exception as e:
+            self.logger.error(f"Could not set frame: {e}")
+
+    def _refresh_keyframe_list(self):
+        self._list_keyframes.clear()
+        for kf in self._anim_keyframes:
+            # Build a compact summary of non-zero dims
+            id_arr = np.array(kf["identity"], dtype=np.float32)
+            ex_arr = np.array(kf["expression"], dtype=np.float32)
+            nonzero_id = int(np.count_nonzero(np.abs(id_arr) > 0.05))
+            nonzero_ex = int(np.count_nonzero(np.abs(ex_arr) > 0.05))
+            g = kf.get("gender", 0.0)
+            gender_str = f"  G:{g:+.1f}" if abs(g) > 0.01 else ""
+            label = (f"Frame {kf['frame']:>4}  —  "
+                     f"IC:{nonzero_id}  EX:{nonzero_ex}{gender_str}")
+            self._list_keyframes.addItem(label)
+
+    def _interpolate_at_frame(self, frame: int):
+        """Return (identity, expression, rotations) interpolated at the given frame."""
+        kfs = self._anim_keyframes
+        if not kfs:
+            return None, None, None
+        if frame <= kfs[0]["frame"]:
+            k = kfs[0]
+        elif frame >= kfs[-1]["frame"]:
+            k = kfs[-1]
+        else:
+            # Find surrounding pair
+            prev = next(k for k in reversed(kfs) if k["frame"] <= frame)
+            nxt  = next(k for k in kfs if k["frame"] > frame)
+            t = (frame - prev["frame"]) / (nxt["frame"] - prev["frame"])
+            identity   = (np.array(prev["identity"],   dtype=np.float32) * (1 - t)
+                        + np.array(nxt["identity"],    dtype=np.float32) * t)
+            expression = (np.array(prev["expression"], dtype=np.float32) * (1 - t)
+                        + np.array(nxt["expression"],  dtype=np.float32) * t)
+            rotations  = (np.array(prev["rotations"],  dtype=np.float32) * (1 - t)
+                        + np.array(nxt["rotations"],   dtype=np.float32) * t)
+            return identity, expression, rotations
+        return (np.array(k["identity"],   dtype=np.float32),
+                np.array(k["expression"], dtype=np.float32),
+                np.array(k["rotations"],  dtype=np.float32))
+
+    def apply_params_at_frame(self, frame: int):
+        """Called by the MAXScript time callback on every frame change."""
+        if not self._anim_armed or not self._check_mesh_valid():
+            return
+        identity, expression, rotations = self._interpolate_at_frame(frame)
+        if identity is None:
+            return
+        gnm_bridge.interpolate_and_update(
+            self._current_mesh, identity, expression, rotations, logger=self.logger)
+        QtCore.QTimer.singleShot(0, self._redraw_views)
+
+    def _refresh_saved_anims(self):
+        self._list_saved_anims.clear()
+        if self._ANIM_DIR.exists():
+            for f in sorted(self._ANIM_DIR.glob("*.json")):
+                self._list_saved_anims.addItem(f.stem)
+
+    def _on_save_animation(self):
+        name = self._edit_anim_name.text().strip()
+        if not name:
+            name = self._current_mesh.name if self._check_mesh_valid() else "animation"
+        self._ANIM_DIR.mkdir(parents=True, exist_ok=True)
+        dest = self._ANIM_DIR / f"{name}.json"
+        try:
+            dest.write_text(json.dumps(self._anim_keyframes, indent=2), encoding="utf-8")
+            self.logger.info(f"Animation '{name}' saved ({len(self._anim_keyframes)} keyframes).")
+            self._refresh_saved_anims()
+        except Exception as e:
+            self.logger.error(f"Failed to save animation: {e}")
+
+    def _load_animation_by_name(self, name: str):
+        src = self._ANIM_DIR / f"{name}.json"
+        if not src.exists():
+            self.logger.warning(f"Animation file not found: {src.name}")
+            return
+        try:
+            self._anim_keyframes = json.loads(src.read_text(encoding="utf-8"))
+            self._anim_keyframes.sort(key=lambda k: k["frame"])
+            self._refresh_keyframe_list()
+            self.logger.info(f"Animation '{name}' loaded: {len(self._anim_keyframes)} keyframes.")
+            if self._anim_keyframes:
+                kf = self._anim_keyframes[0]
+                id_arr = np.array(kf["identity"],   dtype=np.float32)
+                ex_arr = np.array(kf["expression"], dtype=np.float32)
+                n_id = min(len(id_arr), len(self._identity))
+                n_ex = min(len(ex_arr), len(self._expression))
+                self._identity[:] = 0.0;  self._identity[:n_id] = id_arr[:n_id]
+                self._expression[:] = 0.0; self._expression[:n_ex] = ex_arr[:n_ex]
+                self._rotations[:] = np.array(kf["rotations"], dtype=np.float32)
+                self._gender_strength = float(kf.get("gender", 0.0))
+                self._apply_identity_to_sliders()
+                self._apply_expression_to_sliders()
+        except Exception as e:
+            self.logger.error(f"Failed to load animation: {e}")
+
+    def _on_load_animation(self):
+        item = self._list_saved_anims.currentItem()
+        if item:
+            self._load_animation_by_name(item.text())
+        else:
+            self.logger.warning("Select an animation from the list, or double-click it.")
+
+    def _on_delete_saved_animation(self):
+        item = self._list_saved_anims.currentItem()
+        if not item:
+            return
+        name = item.text()
+        reply = QtWidgets.QMessageBox.question(
+            self, "Delete Animation", f'Delete "{name}"?',
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            try:
+                (self._ANIM_DIR / f"{name}.json").unlink(missing_ok=True)
+                self._refresh_saved_anims()
+                self.logger.info(f"Animation '{name}' deleted.")
+            except Exception as e:
+                self.logger.error(f"Failed to delete: {e}")
+
+    def _on_bake_pc2(self):
+        """Bake GNM keyframes to Max timeline using Morpher modifier.
+
+        Strategy:
+        1. Generate a mesh snapshot for each defined GNM keyframe
+        2. Add a Morpher modifier to the base mesh
+        3. Load each snapshot as a morph target (channel)
+        4. Key each channel's weight: 100 at its frame, 0 elsewhere
+        This produces real keyframes visible on the Max timeline.
+        """
+        if not self._check_mesh_valid():
+            self.logger.warning("No active GNM mesh.")
+            return
+        if len(self._anim_keyframes) < 2:
+            self.logger.warning("Need at least 2 keyframes to bake.")
+            return
+
+        import pymxs
+        rt = pymxs.runtime
+
+        try:
+            start_frame = int(rt.animationRange.start.frame)
+            end_frame   = int(rt.animationRange.end.frame)
+        except Exception as e:
+            self.logger.error(f"Could not read scene timeline: {e}")
+            return
+
+        mesh_obj  = self._current_mesh
+        mesh_name = mesh_obj.name
+        kfs = sorted(self._anim_keyframes, key=lambda k: k["frame"])
+        n_kf = len(kfs)
+
+        self._btn_bake.setEnabled(False)
+        self._bake_progress.setVisible(True)
+        self._bake_progress.setValue(0)
+        QtWidgets.QApplication.processEvents()
+
+        target_names = []
+        try:
+            # Step 1 — Generate snapshot mesh for every keyframe
+            self.logger.info("Baking: creating morph target meshes…")
+            for fi, kf in enumerate(kfs):
+                id_arr = np.array(kf["identity"],   dtype=np.float32)
+                ex_arr = np.array(kf["expression"], dtype=np.float32)
+                ro_arr = np.array(kf["rotations"],  dtype=np.float32)
+                vertices, triangles, _ = gnm_bridge.generate_head(
+                    identity=id_arr, expression=ex_arr, rotations=ro_arr)
+                if vertices is None:
+                    self.logger.error(f"Keyframe {kf['frame']}: generate_head failed.")
+                    return
+                tname = f"_gnm_target_{fi}"
+                target_names.append(tname)
+                gnm_bridge.create_max_mesh(vertices, triangles, name=tname)
+                self._bake_progress.setValue(int((fi + 1) / n_kf * 40))
+                QtWidgets.QApplication.processEvents()
+
+            # Step 2 — Add Morpher modifier via MAXScript
+            self.logger.info("Baking: adding Morpher modifier…")
+            rt.execute(
+                f'(select (getNodeByName "{mesh_name}"); '
+                f'max modify mode; '
+                f'addModifier $ (Morpher()))'
+            )
+
+            # Step 3 — Load targets and key weights
+            # WM3 functions require the node to be selected in Modify panel
+            self.logger.info("Baking: keying morph weights…")
+            for fi, (kf, tname) in enumerate(zip(kfs, target_names)):
+                frame = kf["frame"]
+                ch = fi + 1
+
+                # Single MAXScript block: node is selected, modify panel active
+                mxs = (
+                    f'(\n'
+                    f'  local m = $.modifiers[#Morpher]\n'
+                    f'  local t = getNodeByName "{tname}"\n'
+                    f'  WM3_MC_BuildFromNode m {ch} t\n'
+                    f'  animate on (\n'
+                    f'    at time {start_frame}f (WM3_MC_SetValue m {ch} 0.0)\n'
+                    f'    at time {frame}f       (WM3_MC_SetValue m {ch} 100.0)\n'
+                    f'    at time {end_frame}f   (WM3_MC_SetValue m {ch} 0.0)\n'
+                    f'  )\n'
+                    f')'
+                )
+                result = rt.execute(mxs)
+                if result is False:
+                    self.logger.error(f"Morph channel {ch} failed for frame {frame}")
+
+                self._bake_progress.setValue(40 + int((fi + 1) / n_kf * 50))
+                QtWidgets.QApplication.processEvents()
+
+            # Step 4 — Delete temporary target meshes
+            for tname in target_names:
+                rt.execute(f'(local t = getNodeByName "{tname}"; if t != undefined do delete t)')
+
+            QtCore.QTimer.singleShot(0, self._redraw_views)
+            self._bake_progress.setValue(100)
+            self.logger.info(
+                f"Baked {n_kf} morph targets to timeline "
+                f"(frames {start_frame}–{end_frame}). "
+                f"Morpher modifier added to '{mesh_name}'.")
+
+        except Exception as e:
+            self.logger.error(f"Bake failed: {e}")
+            for tname in target_names:
+                try:
+                    rt.execute(f'(local t = getNodeByName "{tname}"; if t != undefined do delete t)')
+                except Exception:
+                    pass
+        finally:
+            self._btn_bake.setEnabled(True)
+            self._bake_progress.setVisible(False)
 
     # ─── Population logic ────────────────────────────────────────────────────
 

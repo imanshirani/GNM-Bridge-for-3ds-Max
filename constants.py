@@ -1,4 +1,4 @@
-VERSION = "0.0.1"
+VERSION = "0.0.2"
 TOOL_NAME = "GNM Head Generator"
 AUTHOR = "Iman Shirani"
 

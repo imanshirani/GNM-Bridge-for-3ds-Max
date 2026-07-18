@@ -306,8 +306,6 @@ def create_max_mesh(vertices, triangles, triangle_uvs=None, name="GNM_Head",
 
             rt.select(mesh_obj)
 
-        rt.redrawViews()
-
         if identity is not None:
             save_identity_to_mesh(mesh_obj, identity)
 
@@ -397,8 +395,8 @@ def is_gnm_mesh(mesh_obj) -> bool:
 def update_max_mesh_vertices(mesh_obj, vertices, logger=None):
     """Update vertex positions of an existing Editable Mesh.
 
-    GNM outputs vertices in object-local space and setVert works in object-local
-    space, so the node transform (position/rotation/pivot) is untouched.
+    Does NOT call redrawViews() — caller is responsible for scheduling a redraw
+    outside Max's notification stack to avoid DirtyNotificationEventMonitor errors.
     """
     try:
         import pymxs
@@ -408,10 +406,23 @@ def update_max_mesh_vertices(mesh_obj, vertices, logger=None):
             rt.setVert(mesh_obj, i + 1, rt.point3(float(x), float(y), float(z)))
 
         rt.update(mesh_obj)
-        rt.redrawViews()
     except Exception as e:
         if logger:
             logger.error(f"Failed to update mesh vertices: {e}")
+
+
+def interpolate_and_update(mesh_obj, identity, expression, rotations, logger=None):
+    """Generate vertices for interpolated params and update an existing mesh.
+
+    Called from the MAXScript timeChangeCallback on every frame scrub.
+    Does NOT call redrawViews() — caller must schedule it outside Max's
+    notification stack (e.g. via QTimer.singleShot) to avoid
+    DirtyNotificationEventMonitor errors.
+    """
+    vertices, _, _ = generate_head(
+        identity=identity, expression=expression, rotations=rotations, logger=logger)
+    if vertices is not None:
+        update_max_mesh_vertices(mesh_obj, vertices, logger=logger)
 
 
 def reset_model():
