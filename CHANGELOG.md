@@ -3,6 +3,29 @@
 All notable changes to GNM Head Generator for 3ds Max are documented here.
 
 ---
+## [0.0.3] — 2026-07-19
+
+### Added
+
+#### Wav2Vec2 Offline AI Lip Sync
+- New **Wav2Vec2 Lip Sync (Offline AI)** button in the Animation tab
+- Powered by [Facebook Wav2Vec2-base-960h](https://huggingface.co/facebook/wav2vec2-base-960h) — no API key, no internet after first run
+- Runs as an isolated subprocess so 3ds Max never imports torch directly (avoids DLL hang)
+- WAV files are automatically resampled to 16kHz mono before inference
+- Character-level CTC output mapped to 9 Preston Blair phoneme codes → GNM expression keyframes
+- **Strength** spinner (0.1 – 3.0) to scale phoneme expression intensity
+- Model (~378 MB) and PyTorch CPU (~200 MB) downloaded once, cached in `vendor/wav2vec2/`
+
+#### Lip Sync from Audio (Rhubarb)
+- New **Lip Sync from Audio** section in the Animation tab
+- Powered by [Rhubarb Lip Sync](https://github.com/DanielSWolf/rhubarb-lip-sync) (~8 MB, downloaded automatically)
+- Browse a WAV file, set FPS, start frame, and blend frames (cross-fade between phonemes)
+- **Generate Lip Sync** — runs Rhubarb in a background worker, converts 9 Preston Blair phoneme codes to GNM expression keyframes
+- **Clear Lip Sync** — removes only lip-sync keyframes, leaving manual keyframes intact
+- Phoneme → GNM expression mapping updated with richer multi-dimensional values (dims 200–215)
+- Expression decoder used for calibration when h5py is available (150-dim lower-face slice)
+- Sparse-detection: falls back to decoder output if calibration JSON has fewer than 15 non-zero dims per phoneme
+
 
 ## [0.0.2] — 2025-07-17
 
