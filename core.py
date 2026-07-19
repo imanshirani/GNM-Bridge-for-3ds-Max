@@ -45,11 +45,17 @@ _IDENTITY_NAMES_DEFAULT = [
 #   382     pupils
 _EXPRESSION_REGIONS = [
     # (label,                    start_dim, count, prefix)
-    ("Lower Face — Mouth & Jaw", 200,       25,    "LF"),
-    ("Left Eye",                   0,       20,    "LE"),
-    ("Right Eye",                100,       20,    "RE"),
-    ("Tongue",                   350,       12,    "TG"),
-    ("Pupils / Iris",            382,        1,    "PU"),
+    # Counts match GNM v3 expression_names exactly:
+    #   lower_face_region_000..149  → dims 200-349 (150)
+    #   left_eye_region_000..099    → dims 0-99   (100)
+    #   right_eye_region_000..099   → dims 100-199(100)
+    #   tongue_mean + tongue_000..030→ dims 350-381(32)
+    #   pupils_000                  → dim 382      (1)
+    ("Lower Face — Mouth & Jaw", 200,       150,   "LF"),
+    ("Left Eye",                   0,       100,   "LE"),
+    ("Right Eye",                100,       100,   "RE"),
+    ("Tongue",                   350,        32,   "TG"),
+    ("Pupils / Iris",            382,         1,   "PU"),
 ]
 
 
@@ -91,13 +97,29 @@ class SetupWorker(QtCore.QThread):
 
     def run(self):
         import traceback
+        import sys as _sys
+
+        def _log(msg):
+            self.sig_log.emit(msg)
+
+        def _prog(p, l):
+            self.sig_progress.emit(p, l)
+            self.sig_log.emit(l)
+
         try:
+            _log(f"[Setup] Python: {_sys.executable}")
+            _log(f"[Setup] Version: {_sys.version.split()[0]}")
+            _log("[Setup] Checking pip...")
+            _prog(1, "Starting setup...")
+
             success, result = setup_manager.run_full_setup(
-                progress_cb=lambda p, l: self.sig_progress.emit(p, l),
-                log_cb=lambda m: self.sig_log.emit(m),
+                progress_cb=_prog,
+                log_cb=_log,
             )
         except Exception:
-            success, result = False, traceback.format_exc()
+            tb = traceback.format_exc()
+            _log(f"[Setup] EXCEPTION:\n{tb}")
+            success, result = False, tb
         self.sig_done.emit(success, result)
 
 
@@ -111,7 +133,7 @@ class GenerateWorker(QtCore.QThread):
         self._rotations = rotations.copy()
 
     def run(self):
-        vertices, _tris, _uvs = gnm_bridge.generate_head(
+        vertices, _tris, _uvs, _mids = gnm_bridge.generate_head(
             identity=self._identity,
             expression=self._expression,
             rotations=self._rotations,
@@ -137,7 +159,7 @@ class BatchWorker(QtCore.QThread):
         rng = _np.random.default_rng(self._seed)
         for i in range(self._count):
             identity = rng.standard_normal(253).astype(_np.float32)
-            vertices, triangles, triangle_uvs = gnm_bridge.generate_head(identity=identity)
+            vertices, triangles, triangle_uvs, face_mat_ids = gnm_bridge.generate_head(identity=identity)
             if vertices is not None:
                 col = i % self._cols
                 row = i // self._cols
@@ -145,6 +167,20 @@ class BatchWorker(QtCore.QThread):
                 self.sig_head.emit(vertices, triangles, triangle_uvs, f"GNM_Head_{i+1:02d}", pos, identity)
             self.sig_progress.emit(i + 1, self._count)
         self.sig_done.emit()
+
+
+class _LipSyncWorker(QtCore.QThread):
+    finished = Signal(object)  # list[dict] cues or None
+
+    def __init__(self, wav_path, rhubarb_exe, logger=None, parent=None):
+        super().__init__(parent)
+        self._wav = wav_path
+        self._exe = rhubarb_exe
+        self._logger = logger
+
+    def run(self):
+        cues = gnm_bridge.run_rhubarb(self._wav, self._exe, logger=self._logger)
+        self.finished.emit(cues)
 
 
 # ─── Main Widget ─────────────────────────────────────────────────────────────
@@ -179,6 +215,8 @@ class GNMTool(QtWidgets.QWidget):
         self._gender_strength = 0.0   # -1.0 = full female, +1.0 = full male
         self._anim_keyframes = []     # list of dicts sorted by frame
         self._anim_armed = False      # True when time callback is registered
+        self._lipsync_worker = None
+        self._phoneme_calib = self._load_phoneme_calib()
 
         self._debounce = QtCore.QTimer(self)
         self._debounce.setSingleShot(True)
@@ -923,6 +961,112 @@ class GNMTool(QtWidgets.QWidget):
         sep2.setStyleSheet("color:#444;")
         layout.addWidget(sep2)
 
+        # ── Lip Sync from Audio ──────────────────────────────────────────
+        lipsync_group = QtWidgets.QGroupBox("Lip Sync from Audio")
+        lipsync_group.setCheckable(True)
+        lipsync_group.setChecked(False)  # collapsed by default
+        lipsync_group.setStyleSheet(
+            "QGroupBox { border:1px solid #444; border-radius:4px; margin-top:8px; padding-top:6px; }"
+            "QGroupBox::title { color:#00AAFF; subcontrol-origin:margin; left:8px; }"
+        )
+        ls_layout = QtWidgets.QVBoxLayout(lipsync_group)
+        ls_layout.setSpacing(4)
+
+        # WAV file row
+        wav_row = QtWidgets.QHBoxLayout()
+        self._edit_lipsync_wav = QtWidgets.QLineEdit()
+        self._edit_lipsync_wav.setPlaceholderText("WAV file path…")
+        self._edit_lipsync_wav.setReadOnly(True)
+        btn_browse_wav = QtWidgets.QPushButton("Browse…")
+        btn_browse_wav.setFixedWidth(70)
+        btn_browse_wav.clicked.connect(self._on_lipsync_browse)
+        wav_row.addWidget(QtWidgets.QLabel("WAV:"))
+        wav_row.addWidget(self._edit_lipsync_wav)
+        wav_row.addWidget(btn_browse_wav)
+        ls_layout.addLayout(wav_row)
+
+        # Settings row: FPS + Start Frame + Blend
+        settings_row = QtWidgets.QHBoxLayout()
+        settings_row.addWidget(QtWidgets.QLabel("FPS:"))
+        self._spin_lipsync_fps = QtWidgets.QSpinBox()
+        self._spin_lipsync_fps.setRange(1, 120)
+        self._spin_lipsync_fps.setValue(24)
+        self._spin_lipsync_fps.setFixedWidth(52)
+        settings_row.addWidget(self._spin_lipsync_fps)
+        settings_row.addSpacing(8)
+        settings_row.addWidget(QtWidgets.QLabel("Start:"))
+        self._spin_lipsync_start = QtWidgets.QSpinBox()
+        self._spin_lipsync_start.setRange(0, 99999)
+        self._spin_lipsync_start.setValue(0)
+        self._spin_lipsync_start.setFixedWidth(60)
+        settings_row.addWidget(self._spin_lipsync_start)
+        settings_row.addSpacing(8)
+        settings_row.addWidget(QtWidgets.QLabel("Blend:"))
+        self._spin_lipsync_blend = QtWidgets.QSpinBox()
+        self._spin_lipsync_blend.setRange(0, 20)
+        self._spin_lipsync_blend.setValue(3)
+        self._spin_lipsync_blend.setToolTip("Frames to blend between adjacent phoneme cues")
+        self._spin_lipsync_blend.setFixedWidth(48)
+        settings_row.addWidget(self._spin_lipsync_blend)
+        settings_row.addSpacing(8)
+        settings_row.addWidget(QtWidgets.QLabel("Strength:"))
+        self._spin_lipsync_strength = QtWidgets.QDoubleSpinBox()
+        self._spin_lipsync_strength.setRange(0.1, 3.0)
+        self._spin_lipsync_strength.setSingleStep(0.1)
+        self._spin_lipsync_strength.setValue(1.0)
+        self._spin_lipsync_strength.setDecimals(1)
+        self._spin_lipsync_strength.setFixedWidth(52)
+        self._spin_lipsync_strength.setToolTip("Scale phoneme expression values (0.1 = subtle, 1.0 = normal, 2.0 = exaggerated)")
+        settings_row.addWidget(self._spin_lipsync_strength)
+        settings_row.addStretch()
+        ls_layout.addLayout(settings_row)
+
+        # Generate / Clear buttons
+        ls_btn_row = QtWidgets.QHBoxLayout()
+        self._btn_lipsync_generate = QtWidgets.QPushButton("Generate Lip Sync")
+        self._btn_lipsync_generate.setObjectName("btn_primary")
+        self._btn_lipsync_generate.clicked.connect(self._on_generate_lipsync)
+        self._btn_lipsync_clear = QtWidgets.QPushButton("Clear Lip Sync")
+        self._btn_lipsync_clear.clicked.connect(self._on_clear_lipsync)
+        ls_btn_row.addWidget(self._btn_lipsync_generate)
+        ls_btn_row.addWidget(self._btn_lipsync_clear)
+        ls_layout.addLayout(ls_btn_row)
+
+        # Wav2Vec2 button
+        ls_btn_row_w2v = QtWidgets.QHBoxLayout()
+        self._btn_w2v_generate = QtWidgets.QPushButton("Wav2Vec2 Lip Sync  (Offline AI)")
+        self._btn_w2v_generate.setToolTip(
+            "Use Facebook Wav2Vec2 for higher-quality offline lip sync.\n"
+            "First run: downloads ~400 MB model (one-time, no API key needed).")
+        self._btn_w2v_generate.clicked.connect(self._on_generate_wav2vec2_lipsync)
+        ls_btn_row_w2v.addWidget(self._btn_w2v_generate)
+        ls_layout.addLayout(ls_btn_row_w2v)
+
+        # Load audio into Max timeline
+        ls_btn_row2 = QtWidgets.QHBoxLayout()
+        btn_load_audio = QtWidgets.QPushButton("Load Audio in Timeline")
+        btn_load_audio.setToolTip("Load the WAV file into Max's timeline sound track so you can hear it during scrub/playback.")
+        btn_load_audio.clicked.connect(self._on_load_audio_timeline)
+        ls_btn_row2.addWidget(btn_load_audio)
+        ls_layout.addLayout(ls_btn_row2)
+
+        self._lipsync_progress = QtWidgets.QProgressBar()
+        self._lipsync_progress.setRange(0, 0)  # indeterminate
+        self._lipsync_progress.setVisible(False)
+        self._lipsync_progress.setFixedHeight(8)
+        self._lipsync_progress.setStyleSheet(
+            "QProgressBar { border:none; border-radius:4px; background:#222; }"
+            "QProgressBar::chunk { background:#00AAFF; border-radius:4px; }"
+        )
+        ls_layout.addWidget(self._lipsync_progress)
+
+        layout.addWidget(lipsync_group)
+
+        sep3 = QtWidgets.QFrame()
+        sep3.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep3.setStyleSheet("color:#444;")
+        layout.addWidget(sep3)
+
         self._btn_bake = QtWidgets.QPushButton("Bake to Timeline")
         self._btn_bake.setMinimumHeight(32)
         self._btn_bake.setToolTip(
@@ -1100,11 +1244,12 @@ class GNMTool(QtWidgets.QWidget):
         self._btn_new_mesh.setText("Creating...")
 
         eff_identity = self._get_gendered_identity()
-        vertices, triangles, triangle_uvs = gnm_bridge.generate_head(
+        vertices, triangles, triangle_uvs, face_mat_ids = gnm_bridge.generate_head(
             identity=eff_identity, expression=self._expression, rotations=self._rotations)
         if vertices is not None:
             self._current_mesh = gnm_bridge.create_max_mesh(
-                vertices, triangles, triangle_uvs=triangle_uvs, name=name,
+                vertices, triangles, triangle_uvs=triangle_uvs,
+                face_mat_ids=face_mat_ids, name=name,
                 identity=self._identity, logger=self.logger
             )
         else:
@@ -1844,6 +1989,281 @@ class GNMTool(QtWidgets.QWidget):
             except Exception as e:
                 self.logger.error(f"Failed to delete: {e}")
 
+    # ─── Lip Sync ────────────────────────────────────────────────────────────
+
+    def _on_load_audio_timeline(self):
+        """Load the selected WAV file into Max's timeline using ProSound (Max 2010+)."""
+        wav_path = self._edit_lipsync_wav.text().strip()
+        if not wav_path:
+            self.logger.warning("Select a WAV file first.")
+            return
+        try:
+            import pymxs
+            rt = pymxs.runtime
+            wav_mxs = wav_path.replace("\\", "/")
+            start = self._spin_lipsync_start.value()
+
+            mxs = (
+                f'(\n'
+                f'  local wavPath = @"{wav_mxs}"\n'
+                f'  if not prosound.isactive() do prosound.init true\n'
+                f'  local n = prosound.numtracks()\n'
+                f'  for i = n to 1 by -1 do prosound.delete i\n'
+                f'  local ok = prosound.append wavPath\n'
+                f'  if ok do prosound.setstart 1 {start}f\n'
+                f'  if ok do prosound.setplaybackactive true\n'
+                f'  ok\n'
+                f')'
+            )
+            result = rt.execute(mxs)
+            if result:
+                self.logger.info(
+                    "Audio loaded in Max timeline via ProSound. "
+                    "Press Play with Real Time enabled to hear it."
+                )
+            else:
+                self.logger.error("ProSound returned false — check WAV path.")
+        except Exception as e:
+            self.logger.error(f"Failed to load audio: {e}")
+
+    def _on_lipsync_browse(self):
+        from PySide6 import QtWidgets as _QtW
+        path, _ = _QtW.QFileDialog.getOpenFileName(
+            self, "Select WAV File", "", "WAV Audio (*.wav)")
+        if path:
+            self._edit_lipsync_wav.setText(path)
+
+    def _on_generate_lipsync(self):
+        self.logger.info("Generate Lip Sync clicked...")
+        wav_path = self._edit_lipsync_wav.text().strip()
+        if not wav_path:
+            self.logger.warning("Select a WAV file first.")
+            return
+
+        from pathlib import Path as _Path
+        if not _Path(wav_path).exists():
+            self.logger.error(f"WAV file not found: {wav_path}")
+            return
+
+        from . import setup_manager as _sm
+        rhubarb_exe = str(_sm._RHUBARB_EXE)
+        if not _Path(rhubarb_exe).exists():
+            from PySide6 import QtWidgets as _QtW
+            dlg = _QtW.QMessageBox(self)
+            dlg.setWindowTitle("Rhubarb not installed")
+            dlg.setText("Rhubarb Lip Sync is not installed.")
+            dlg.setInformativeText("Download it now (~8 MB)?")
+            dlg.setIcon(_QtW.QMessageBox.Icon.Question)
+            btn_dl = dlg.addButton("Download Now", _QtW.QMessageBox.ButtonRole.AcceptRole)
+            dlg.addButton("Cancel", _QtW.QMessageBox.ButtonRole.RejectRole)
+            dlg.exec()
+            if dlg.clickedButton() is btn_dl:
+                self._on_download_rhubarb()
+            return
+
+        fps   = self._spin_lipsync_fps.value()
+        start = self._spin_lipsync_start.value()
+        blend = self._spin_lipsync_blend.value()
+
+        self._btn_lipsync_generate.setEnabled(False)
+        self._lipsync_progress.setVisible(True)
+        QtWidgets.QApplication.processEvents()
+
+        self.logger.info(f"Starting Rhubarb: exe={rhubarb_exe}, wav={wav_path}")
+        self._lipsync_worker = _LipSyncWorker(wav_path, rhubarb_exe, self.logger)
+        self._lipsync_worker.finished.connect(
+            lambda cues: self._on_lipsync_done(cues, fps, start, blend))
+        self._lipsync_worker.start()
+
+    def _on_lipsync_done(self, cues, fps, start_frame, blend_frames):
+        self._btn_lipsync_generate.setEnabled(True)
+        self._lipsync_progress.setVisible(False)
+
+        if cues is None:
+            self.logger.error("Lip sync generation failed.")
+            return
+
+        self._apply_lipsync_keyframes(cues, fps, start_frame, blend_frames)
+
+    # ── Wav2Vec2 ─────────────────────────────────────────────────────────────
+
+    def _on_generate_wav2vec2_lipsync(self):
+        wav_path = self._edit_lipsync_wav.text().strip()
+        if not wav_path:
+            self.logger.warning("Select a WAV file first.")
+            return
+        from pathlib import Path as _Path
+        if not _Path(wav_path).exists():
+            self.logger.error(f"WAV file not found: {wav_path}")
+            return
+
+        fps   = self._spin_lipsync_fps.value()
+        start = self._spin_lipsync_start.value()
+        blend = self._spin_lipsync_blend.value()
+
+        self._btn_w2v_generate.setEnabled(False)
+        self._lipsync_progress.setVisible(True)
+        QtWidgets.QApplication.processEvents()
+
+        self.logger.info("Wav2Vec2: loading model and processing audio…")
+
+        class _Wav2Vec2Worker(QtCore.QThread):
+            finished = Signal(object)
+
+            def __init__(self_, wav, log):
+                super().__init__()
+                self_._wav = wav
+                self_._log = log
+
+            def run(self_):
+                cues = gnm_bridge.run_wav2vec2(self_._wav, logger=self_._log)
+                self_.finished.emit(cues)
+
+        self._w2v_worker = _Wav2Vec2Worker(wav_path, self.logger)
+        self._w2v_worker.finished.connect(
+            lambda cues: self._on_wav2vec2_done(cues, fps, start, blend))
+        self._w2v_worker.start()
+
+    def _on_wav2vec2_done(self, cues, fps, start_frame, blend_frames):
+        self._btn_w2v_generate.setEnabled(True)
+        self._lipsync_progress.setVisible(False)
+
+        if cues is None:
+            self.logger.error("Wav2Vec2 lip sync failed — check log above.")
+            return
+
+        self._apply_lipsync_keyframes(cues, fps, start_frame, blend_frames)
+        self.logger.info(f"Wav2Vec2: {len(cues)} phoneme cues → keyframes generated.")
+
+    def _apply_lipsync_keyframes(self, cues, fps, start_frame, blend_frames):
+        """Convert Rhubarb mouthCues to GNM keyframes and add to self._anim_keyframes."""
+        import numpy as np
+
+        if not cues:
+            self.logger.warning("No phoneme cues returned by Rhubarb.")
+            return
+
+        # Total frames = end time of last cue × fps
+        total_secs = max(c["end"] for c in cues)
+        n_frames = int(total_secs * fps) + 1
+
+        # Build per-frame phoneme value (string) with blend transition
+        frame_phonemes = []
+        for fi in range(n_frames):
+            t = fi / fps
+            value = "X"
+            for cue in cues:
+                if cue["start"] <= t < cue["end"]:
+                    value = cue["value"]
+                    break
+            frame_phonemes.append(value)
+
+        # Use in-memory calibration scaled by strength slider
+        strength = getattr(self, "_spin_lipsync_strength", None)
+        strength_val = strength.value() if strength is not None else 1.0
+        phoneme_expr = {
+            code: [v * strength_val for v in vals]
+            for code, vals in self._phoneme_calib.items()
+        }
+        current_id  = self._get_gendered_identity()
+        current_rot = self._rotations.copy()
+
+        # Remove existing lipsync keyframes to avoid duplicates
+        self._anim_keyframes = [
+            kf for kf in self._anim_keyframes if not kf.get("lipsync")
+        ]
+
+        new_kfs = []
+        for fi in range(n_frames):
+            expr = np.zeros(383, dtype=np.float32)
+            cur_vals = np.array(phoneme_expr.get(frame_phonemes[fi], phoneme_expr["X"]),
+                                dtype=np.float32)
+
+            if blend_frames > 0 and fi > 0 and frame_phonemes[fi] != frame_phonemes[fi - 1]:
+                # Blend from previous phoneme over blend_frames frames
+                blend_start = fi
+                blend_end   = min(fi + blend_frames, n_frames)
+                for bfi in range(blend_start, blend_end):
+                    t_blend = (bfi - blend_start + 1) / (blend_frames + 1)
+                    prev_vals = np.array(
+                        phoneme_expr.get(frame_phonemes[fi - 1], phoneme_expr["X"]),
+                        dtype=np.float32)
+                    blended = prev_vals * (1.0 - t_blend) + cur_vals * t_blend
+                    be = np.zeros(383, dtype=np.float32)
+                    be[200:350] = blended
+                    new_kfs.append({
+                        "frame":      start_frame + bfi,
+                        "identity":   current_id.tolist(),
+                        "expression": be.tolist(),
+                        "rotations":  current_rot.tolist(),
+                        "gender":     self._gender_strength,
+                        "lipsync":    True,
+                    })
+                continue  # skip the non-blended insert below for these frames
+
+            expr[200:350] = cur_vals
+            new_kfs.append({
+                "frame":      start_frame + fi,
+                "identity":   current_id.tolist(),
+                "expression": expr.tolist(),
+                "rotations":  current_rot.tolist(),
+                "gender":     self._gender_strength,
+                "lipsync":    True,
+            })
+
+        self._anim_keyframes.extend(new_kfs)
+        self._anim_keyframes.sort(key=lambda k: k["frame"])
+        self._refresh_keyframe_list()
+        self.logger.info(f"Lip sync: {len(new_kfs)} keyframes generated "
+                         f"({n_frames} frames at {fps} fps, offset {start_frame}).")
+
+    def _load_phoneme_calib(self) -> dict:
+        import json as _json
+        from pathlib import Path
+        from . import constants as _c
+
+        # Start from built-in defaults
+        calib = {code: list(vals) for code, vals in _c.PHONEME_EXPR.items()}
+
+        # Try expression decoder (produces full 150-dim natural shapes)
+        try:
+            decoded = gnm_bridge.decode_phoneme_expressions()
+            if decoded:
+                calib.update(decoded)
+        except Exception:
+            pass
+
+        # Override with JSON only if it has DENSE values (decoder-generated).
+        # Sparse JSON (<15 non-zero per phoneme avg) = stale hand-tuned → skip.
+        calib_path = Path(__file__).parent / "phoneme_calibration.json"
+        if calib_path.exists():
+            try:
+                data = _json.loads(calib_path.read_text(encoding="utf-8"))
+                phonemes = data.get("phonemes", {})
+                valid_phonemes = {
+                    code: vals for code, vals in phonemes.items()
+                    if isinstance(vals, list) and len(vals) == 150
+                }
+                if valid_phonemes:
+                    avg_nonzero = sum(
+                        sum(1 for v in vals if abs(v) > 0.01)
+                        for vals in valid_phonemes.values()
+                    ) / len(valid_phonemes)
+                    if avg_nonzero >= 15:
+                        calib.update(valid_phonemes)
+            except Exception:
+                pass
+        return calib
+
+    def _on_clear_lipsync(self):
+        before = len(self._anim_keyframes)
+        self._anim_keyframes = [
+            kf for kf in self._anim_keyframes if not kf.get("lipsync")
+        ]
+        removed = before - len(self._anim_keyframes)
+        self._refresh_keyframe_list()
+        self.logger.info(f"Cleared {removed} lip-sync keyframes.")
+
     def _on_bake_pc2(self):
         """Bake GNM keyframes to Max timeline using Morpher modifier.
 
@@ -1889,7 +2309,7 @@ class GNMTool(QtWidgets.QWidget):
                 id_arr = np.array(kf["identity"],   dtype=np.float32)
                 ex_arr = np.array(kf["expression"], dtype=np.float32)
                 ro_arr = np.array(kf["rotations"],  dtype=np.float32)
-                vertices, triangles, _ = gnm_bridge.generate_head(
+                vertices, triangles, _, _ = gnm_bridge.generate_head(
                     identity=id_arr, expression=ex_arr, rotations=ro_arr)
                 if vertices is None:
                     self.logger.error(f"Keyframe {kf['frame']}: generate_head failed.")
@@ -2029,15 +2449,43 @@ class GNMTool(QtWidgets.QWidget):
         )
         act_path = menu.addAction("Reveal Install Path")
         menu.addSeparator()
+        from . import setup_manager as _sm
+        _rhubarb_label = (
+            "Rhubarb Lip Sync — installed" if _sm._RHUBARB_EXE.exists()
+            else "Download Rhubarb Lip Sync (~8 MB)"
+        )
+        act_rhubarb = menu.addAction(_rhubarb_label)
+        act_rhubarb.setEnabled(not _sm._RHUBARB_EXE.exists())
+        menu.addSeparator()
         act_reinstall = menu.addAction("Reinstall")
         menu.addSeparator()
         act_about = menu.addAction("About")
 
         act_path.triggered.connect(self._on_reveal_install_path)
+        act_rhubarb.triggered.connect(self._on_download_rhubarb)
         act_reinstall.triggered.connect(self._on_reinstall)
         act_about.triggered.connect(self._on_show_about)
 
         menu.exec(self._btn_settings.mapToGlobal(self._btn_settings.rect().bottomLeft()))
+
+    def _on_download_rhubarb(self):
+        self.logger.info("Downloading Rhubarb Lip Sync...")
+
+        class _RhubarbWorker(QtCore.QThread):
+            sig_done = Signal(bool)
+            def run(self_):
+                ok = setup_manager.ensure_rhubarb(
+                    log_cb=lambda m: self.logger.info(m))
+                self_.sig_done.emit(ok)
+
+        self._rhubarb_dl_worker = _RhubarbWorker(self)
+        self._rhubarb_dl_worker.sig_done.connect(
+            lambda ok: self.logger.info(
+                "Rhubarb ready — you can now use Lip Sync from Audio." if ok
+                else "Rhubarb download failed. Check your internet connection."
+            )
+        )
+        self._rhubarb_dl_worker.start()
 
     def _on_reveal_install_path(self):
         import subprocess
@@ -2053,10 +2501,10 @@ class GNMTool(QtWidgets.QWidget):
     def _on_show_about(self):
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(f"About {constants.TOOL_NAME}")
-        dlg.setFixedWidth(340)
+        dlg.setFixedWidth(400)
         dlg.setStyleSheet(constants.STYLESHEET)
         lay = QtWidgets.QVBoxLayout(dlg)
-        lay.setSpacing(12)
+        lay.setSpacing(10)
         lay.setContentsMargins(20, 20, 20, 20)
 
         # Title + version
@@ -2079,13 +2527,52 @@ class GNMTool(QtWidgets.QWidget):
         lbl_desc.setWordWrap(True)
         lay.addWidget(lbl_desc)
 
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#444;")
-        lay.addWidget(sep)
+        # ── What gets downloaded ──────────────────────────────────────
+        sep1 = QtWidgets.QFrame()
+        sep1.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep1.setStyleSheet("color:#444;")
+        lay.addWidget(sep1)
 
-        # GitHub button — #24292e (GitHub dark)
-        btn_github = QtWidgets.QPushButton("  View on GitHub")
+        lbl_req_title = QtWidgets.QLabel("What gets downloaded on first use:")
+        lbl_req_title.setStyleSheet("color:#00AAFF; font-size:11px; font-weight:bold;")
+        lay.addWidget(lbl_req_title)
+
+        requirements = [
+            ("GNM Model (Google)",        "~15 MB",  "github.com/google/GNM"),
+            ("Python packages",           "~50 MB",  "h5py, scipy, trimesh, …"),
+            ("Rhubarb Lip Sync",          "~8 MB",   "Lip sync via phoneme rules"),
+            ("PyTorch CPU",               "~200 MB", "Required for Wav2Vec2"),
+            ("Wav2Vec2 Model (Facebook)", "~378 MB", "Offline AI lip sync (1st use only)"),
+        ]
+
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(3)
+        for row, (name, size, note) in enumerate(requirements):
+            lbl_name = QtWidgets.QLabel(f"• {name}")
+            lbl_name.setStyleSheet("color:#dddddd; font-size:11px;")
+            lbl_size = QtWidgets.QLabel(size)
+            lbl_size.setStyleSheet("color:#FFA500; font-size:11px; font-weight:bold;")
+            lbl_note = QtWidgets.QLabel(note)
+            lbl_note.setStyleSheet("color:#666; font-size:10px;")
+            grid.addWidget(lbl_name, row, 0)
+            grid.addWidget(lbl_size, row, 1)
+            grid.addWidget(lbl_note, row, 2)
+        lay.addLayout(grid)
+
+        lbl_total = QtWidgets.QLabel("Total (first run): ~650 MB  —  reused on every subsequent run")
+        lbl_total.setStyleSheet("color:#888; font-size:10px; font-style:italic;")
+        lbl_total.setWordWrap(True)
+        lay.addWidget(lbl_total)
+
+        # ── Links ─────────────────────────────────────────────────────
+        sep2 = QtWidgets.QFrame()
+        sep2.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#444;")
+        lay.addWidget(sep2)
+
+        # Plugin GitHub
+        btn_github = QtWidgets.QPushButton("  GNM Bridge — Plugin on GitHub")
         btn_github.setIcon(self.style().standardIcon(
             QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
         btn_github.setStyleSheet(
@@ -2098,8 +2585,8 @@ class GNMTool(QtWidgets.QWidget):
         ))
         lay.addWidget(btn_github)
 
-        # Google GNM button — #4285F4 (Google blue)
-        btn_gnm = QtWidgets.QPushButton("  Google GNM Model")
+        # Google GNM
+        btn_gnm = QtWidgets.QPushButton("  Google GNM Model (source)")
         btn_gnm.setStyleSheet(
             "QPushButton { background:#4285F4; color:#ffffff; border:none; "
             "border-radius:5px; padding:7px 12px; font-size:12px; font-weight:bold; }"
@@ -2110,7 +2597,7 @@ class GNMTool(QtWidgets.QWidget):
         ))
         lay.addWidget(btn_gnm)
 
-        # PayPal donate button — #009cde (PayPal blue)
+        # PayPal donate
         btn_donate = QtWidgets.QPushButton("  Donate via PayPal")
         btn_donate.setStyleSheet(
             "QPushButton { background:#009cde; color:#ffffff; border:none; "
