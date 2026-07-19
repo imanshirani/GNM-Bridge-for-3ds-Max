@@ -125,7 +125,7 @@ Category headers can be **renamed** by right-clicking the category name.
 
 Animate GNM head parameters over the Max timeline using keyframes and live scrubbing.
 
-#### Workflow
+#### Basic keyframe workflow
 
 1. Set slider values for frame 0 → click **Add Keyframe**
 2. Move the Max timeline to another frame, adjust sliders → click **Add Keyframe** again
@@ -133,17 +133,27 @@ Animate GNM head parameters over the Max timeline using keyframes and live scrub
 4. Click **Arm Animation** — scrubbing the Max timeline now updates the mesh live (linear interpolation)
 5. Click **Bake to Timeline** to bake all keyframes as a Morpher modifier with real timeline keys
 
-![screenshot](etc/ScreenshotE.png)
+
+
+#### Lip Sync from Audio
+
+1. Browse a **WAV file**
+2. Choose **Generate Lip Sync** (Rhubarb) or **Wav2Vec2 Lip Sync (Offline AI)**
+3. Keyframes are applied automatically — use **Strength** to scale mouth movement intensity
+4. **Clear Lip Sync** removes only lip-sync keyframes
 
 | Control | Description |
 |---------|-------------|
-| **Arm / Disarm** | Toggle live timeline scrubbing on/off |
-| **Add Keyframe** | Snapshot current sliders at the current Max frame |
-| **Go To Frame** | Jump the Max timeline to the selected keyframe |
-| **Delete** | Remove the selected keyframe |
-| **Clear All** | Remove all keyframes |
-| **Bake to Timeline** | Add a Morpher modifier and create real Max timeline keys for each keyframe |
-| **Save JSON / Load JSON** | Save or restore the keyframe list to/from `GNM/animation/` |
+| **Arm / Disarm** | Toggle live timeline scrubbing |
+| **Add Keyframe** | Snapshot current sliders at current frame |
+| **Go To Frame** | Jump timeline to selected keyframe |
+| **Delete / Clear All** | Remove keyframes |
+| **Bake to Timeline** | Create Morpher modifier with real Max keys |
+| **Save / Load JSON** | Persist keyframe list to `GNM/animation/` |
+| **Strength** | Scale phoneme expression intensity (0.1 – 3.0) |
+
+![screenshot](etc/ScreenshotE.png)
+
 
 > **Note:** Bake to Timeline generates one morph target mesh per keyframe, builds a Morpher modifier, then deletes the temporary meshes. The resulting Morpher keys can be exported with FBX or used with any Max renderer.
 
@@ -160,25 +170,29 @@ Generate a grid of random heads in one click:
 
 ---
 
+
 ## File Structure
 
 ```
 GNM/
-├── launch.py           ← Entry point — run this from Max
-├── core.py             ← Main UI (QDockWidget, all tabs)
-├── gnm_bridge.py       ← GNM model interface, mesh creation, UV mapping
-├── setup_manager.py    ← Download, extract, install dependencies
-├── constants.py        ← Version, colours, stylesheet
-├── utils.py            ← QLogger helper
+├── launch.py               ← Entry point
+├── core.py                 ← Main UI (QDockWidget, all tabs)
+├── gnm_bridge.py           ← GNM model interface, mesh creation, lip sync
+├── wav2vec2_worker.py      ← Isolated subprocess for Wav2Vec2 inference
+├── setup_manager.py        ← Download, extract, install dependencies
+├── constants.py            ← Version, colours, stylesheet, phoneme table
+├── utils.py                ← QLogger helper
 ├── __init__.py
-├── slider_names.json   ← Persisted custom slider names (auto-created)
-├── config.json         ← Installation state (auto-created)
-├── presets/            ← Saved presets as JSON + PNG thumbnail pairs
-│   ├── MyPreset.json
-│   └── MyPreset.png
-└── vendor/             ← Downloaded GNM repository (auto-created)
-    └── GNM-main/
+├── config.json             ← Installation state (auto-created)
+├── phoneme_calibration.json ← Lip sync expression calibration (auto-created)
+├── presets/                ← Saved presets (JSON + PNG thumbnail)
+├── animation/              ← Saved animation keyframe files
+└── vendor/
+    ├── GNM-main/           ← Google GNM repository
+    ├── rhubarb/            ← Rhubarb Lip Sync binary
+    └── wav2vec2/           ← Wav2Vec2 model cache (~378 MB)
 ```
+
 
 ---
 
@@ -264,9 +278,12 @@ All installed automatically:
 | Package | Purpose |
 |---------|---------|
 | `numpy` | Array math (1.x for Max 2025/2026, 2.x for Max 2027) |
-| `h5py` | Read gender decoder model without TensorFlow |
+| `h5py` | Read GNM decoder models without TensorFlow |
 | `scipy` | Scientific computing (GNM dependency) |
 | `trimesh` | Mesh utilities (GNM dependency) |
+| `requests` | HTTP downloads |
+| `torch` | PyTorch CPU — required for Wav2Vec2 |
+| `transformers` | HuggingFace Transformers — Wav2Vec2 model |
 | `absl-py` | Google utilities (GNM dependency) |
 | `etils` | Google utilities (GNM dependency) |
 | `immutabledict` | Immutable dicts (GNM dependency) |
@@ -282,7 +299,9 @@ All installed automatically:
 ## Credits
 
 - **GNM model:** [Google LLC](https://github.com/google/GNM) — Apache 2.0 License
-- **Plugin:** Iman Shirani
+- **Wav2Vec2 model:** [Facebook AI Research](https://huggingface.co/facebook/wav2vec2-base-960h) — Apache 2.0 License
+- **Rhubarb Lip Sync:** [Daniel S. Wolf](https://github.com/DanielSWolf/rhubarb-lip-sync) — MIT License
+- **Plugin:** Iman Shirani — [github.com/imanshirani/GNM-Bridge-for-3ds-Max](https://github.com/imanshirani/GNM-Bridge-for-3ds-Max/)
 
 > **Note on the GNM model:** The GNM was trained on datasets using binary gender categories and four broad demographic groups (Middle Eastern, Asian, White, Black). It does not represent all gender identities or the full diversity of the global population. See the [GNM README](https://github.com/google/GNM) for details.
 
