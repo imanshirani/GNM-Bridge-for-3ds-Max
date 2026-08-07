@@ -5,6 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-41CD52?style=flat-square&logo=qt&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-purple?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.0.2-orange)
 
 A parametric 3D human head generator plugin for **3ds Max 2025 / 2026 / 2027**, powered by [Google's GNM (Generative Neural Mesh)](https://github.com/google/GNM) model.
 
