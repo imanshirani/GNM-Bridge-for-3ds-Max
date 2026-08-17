@@ -121,7 +121,6 @@ Category headers can be **renamed** by right-clicking the category name.
 
 ![screenshot](etc/ScreenshotD.png)
 
-
 ### Animation tab
 
 Animate GNM head parameters over the Max timeline using keyframes and live scrubbing.
